@@ -1,0 +1,1089 @@
+import cv2
+import numpy as np
+import serial
+import time
+import os
+import matplotlib.pyplot as plt
+
+from tkinter import *
+from PIL import Image, ImageTk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from tkinter import filedialog
+from tkinter import messagebox
+from cryptography.fernet import Fernet
+
+# Biến toàn cục
+cap = None
+waiting_for_capture = False
+is_configAB, is_autoAB, is_autoABA, is_manualAB = False, False, True, False
+dataC, drawC, captureB = False, False, False
+is_load, is_locked, is_startup = False, True, True
+is_autoDelayB, is_autoDelayT = False, False
+is_config, is_MarkConfig = False, False
+capture_start_time = 0
+d_values, l_values, time_stamps, object_count = [], [], [], []
+phoi, phoi_pie = [0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0]
+phoi_array = ['30x50', '30x60', '35x50', '35x60', '40x50', '40x60']
+info_array = ['', '', '']
+lock_time, total_phoi = 0, 0
+a, b, Td = 5.69, 6.68, 2.4
+PassWord = "111111"
+w, h, sl, tl, td = 0, 0, 0, 0, 0
+count_config, wt, ht, autoDelay_StartTime = 0, 0, 0, 0
+HSVupper, HSVlower = np.array([35, 120, 160]), np.array([15, 75, 75])
+
+
+# Hàm làm tròn kích thước
+def round_d(x):
+    if x < 35:
+        x1 = abs(x - 30)
+        x2 = abs(x - 35)
+        if x1 < x2:
+            return 30
+        else:
+            return 35
+    if x >= 35:
+        x1 = abs(x - 35)
+        x2 = abs(x - 40)
+        if x1 < x2:
+            return 35
+        else:
+            return 40
+
+
+def round_l(y):
+    y1 = abs(y - 50)
+    y2 = abs(y - 60)
+    if y1 < y2:
+        return 50
+    else:
+        return 60
+
+
+# Hàm cập nhật video và vẽ biểu đồ
+def update_frame(video_canvas, detection_canvas, info_label, graph_canvas):
+    global cap, waiting_for_capture, capture_start_time, d_values, l_values, time_stamps, object_count, total_phoi, drawC, captureB
+    global is_locked, lock_time, Td, a, b, dataC, w, h, is_autoAB, is_autoDelayT, is_autoDelayB, autoDelay_StartTime
+
+    # Dừng đọc video khi tiến hành cấu hình lại HSV
+    if not is_MarkConfig:
+        ret, frame = cap.read()
+        if not ret:
+            root.after(10, update_frame, video_canvas, detection_canvas, info_label, graph_canvas)
+            return
+
+        # Hiển thị video trực tiếp
+        frame_resized = cv2.resize(frame, (640, 480))
+        frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+        frame_pil = ImageTk.PhotoImage(image=Image.fromarray(frame_rgb))
+        video_canvas.create_image(0, 0, anchor=NW, image=frame_pil)
+        video_canvas.image = frame_pil
+
+        if captureB:
+            print("Phím 'c' được nhấn, bắt đầu chờ chụp ảnh...")
+            waiting_for_capture = True
+            capture_start_time = time.time()
+            if is_autoDelayB:
+                is_autoDelayT = True
+                autoDelay_StartTime = time.time()
+            captureB = False
+
+        # Xử lý nhận diện sau khoảng trễ Td
+        if waiting_for_capture:
+            elapsed_time = time.time() - capture_start_time
+            if elapsed_time >= Td:
+                waiting_for_capture = False
+
+                # Chuyển đổi sang HSV và nhận diện
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                lower_brown = HSVlower
+                upper_brown = HSVupper
+                mask = cv2.inRange(hsv, lower_brown, upper_brown)
+                blurred = cv2.GaussianBlur(mask, (11, 11), 0)
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+                morph = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
+                contours, _ = cv2.findContours(morph, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                # Chụp ảnh để nhận diện
+                detected_frame = frame.copy()
+                d, l = 0, 0
+                count = 0
+
+                # Nhận diện ảnh, tính toán kích thước, tổng số phôi
+                for cnt in contours:
+                    area = cv2.contourArea(cnt)
+                    if area > 10000:
+                        count += 1
+                        x, y, w, h = cv2.boundingRect(cnt)
+                        cv2.rectangle(detected_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                        d = round_d(w / a)
+                        l = round_l(h / b)
+                        if is_manualAB:
+                            cv2.putText(detected_frame, f"{w}x{h}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                        (255, 0, 0), 2)
+                        else:
+                            cv2.putText(detected_frame, f"{d}x{l}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                        (255, 0, 0), 2)
+                        if l == 50:
+                            if d == 30:
+                                phoi[0] += 1
+                            elif d == 35:
+                                phoi[2] += 1
+                            else:
+                                phoi[4] += 1
+                        else:
+                            if d == 30:
+                                phoi[1] += 1
+                            elif d == 35:
+                                phoi[3] += 1
+                            else:
+                                phoi[5] += 1
+                        total_phoi += 1
+
+                is_autoAB = True
+                if not is_configAB:
+                    is_autoAB = False
+
+                # Hiển thị ảnh nhận diện
+                detected_rgb = cv2.cvtColor(detected_frame, cv2.COLOR_BGR2RGB)
+                detected_resized = cv2.resize(detected_rgb, (640, 480))
+                detected_pil = ImageTk.PhotoImage(image=Image.fromarray(detected_resized))
+                detection_canvas.create_image(0, 0, anchor=NW, image=detected_pil)
+                detection_canvas.image = detected_pil
+
+                # Thêm dữ liệu vào danh sách và vẽ biểu đồ
+                current_time = time.time() - capture_start_time
+                time_stamps.append(current_time)
+                object_count.append(count)
+                if count == 0:
+                    messagebox.showwarning("Cảnh báo",
+                                           "Không phát hiện phôi, kiểm tra lại khoảng trễ nhận diện, bộ cấp phôi hoặc bộ dãn cách phôi.")
+
+                # Cập nhật các giá trị d và l (vị trí hoặc kích thước)
+                d_values.append(d)
+                l_values.append(l)
+
+                drawC = True
+
+    # Vẽ lại biểu đồ
+    if drawC:
+        draw_graph(graph_canvas)
+
+    # Tắt quyền admin sau 5 phút không sử dụng
+    if not is_config:
+        if is_locked and not is_startup:
+            if time.time() - lock_time >= 300:
+                admin_disable()
+
+    # Lưu giá trị bảo mật vào file data
+    if dataC:
+        save_data()
+
+    # Xét biến để thay đổi hệ số a, b tự động
+    if is_configAB:
+        change_autoABN()
+
+    # Cập nhật thông số trên info_label
+    info_text = f"Cổng kết nối : {info_array[0]}\n"
+    info_text += f"Kênh Serial:  {info_array[1]}\n"
+    info_text += f"Webcam ID : {info_array[2]}"
+    info_label.config(text=info_text)
+
+    # Lặp lại
+    root.after(10, update_frame, video_canvas, detection_canvas, info_label, graph_canvas)
+
+
+# Hàm vẽ biểu đồ
+def draw_graph(graph_canvas):
+    global drawC
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+
+    # Biểu đồ cột: vẽ số lượng phôi cho từng loại
+    bars = ax1.bar(phoi_array, phoi, color=plt.cm.Paired.colors[:len(phoi)])
+    ax1.set_xlabel('Loại phôi')
+    ax1.set_ylabel('Số lượng phôi')
+    ax1.set_title("Số lượng phôi theo loại")
+
+    # Thêm số lượng phôi lên mỗi cột
+    for bar in bars:
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width() / 2, height,  # Vị trí để text (trên cột)
+                 str(int(height)), ha='center', va='bottom', fontsize=10)
+
+    # Tính phần trăm của mỗi loại phôi
+    if total_phoi > 0:
+        phoi_percent = [100 * x / total_phoi for x in phoi]
+        wedges, _, autotexts = ax2.pie(
+            phoi_percent,
+            labels=None,  # Không hiển thị nhãn trực tiếp trên biểu đồ
+            autopct='%1.1f%%',
+            startangle=90,
+            colors=plt.cm.Paired.colors[:len(phoi)]
+        )
+
+        # Thêm chú giải (legend) cho biểu đồ tròn
+        ax2.legend(wedges, phoi_array, title="Loại phôi", loc="upper right", bbox_to_anchor=(1.2, 1))
+
+    ax2.set_title("Phần trăm của các loại phôi")
+
+    # Xóa biểu đồ cũ (nếu có) trước khi vẽ lại
+    for widget in graph_canvas.winfo_children():
+        widget.destroy()
+
+    # Hiển thị biểu đồ trong Tkinter
+    canvas = FigureCanvasTkAgg(fig, master=graph_canvas)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=BOTH, expand=True)
+    drawC = False
+
+
+# Hàm thoát chương trình
+def exit_program():
+    root.quit()
+
+
+# Hàm cài lại giá trị phôi và tổng số phôi
+def reset_phoi():
+    global phoi, total_phoi, drawC
+    phoi = [0, 0, 0, 0, 0, 0]
+    total_phoi = 0
+    drawC = True
+
+
+# Hàm lưu giá trị phôi và tổng số phôi vào file
+def save_phoi():
+    try:
+        # Mở cửa sổ chọn đường dẫn và tên tệp để lưu
+        file_path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text Files", "*.txt")])
+        if not file_path:  # Kiểm tra nếu người dùng không chọn tệp
+            return
+
+        # Ghi dữ liệu vào tệp với mã hóa UTF-8
+        with open(file_path, "w", encoding="utf-8") as file:
+            file.write("Tổng số phôi: {}\n".format(total_phoi))
+            for i in range(len(phoi)):
+                file.write("{}: {}\n".format(phoi_array[i], phoi[i]))
+
+        # Thông báo khi lưu thành công
+        messagebox.showinfo("Thông báo", f"Dữ liệu phôi đã được lưu vào {file_path}")
+    except Exception as e:
+        # Thông báo khi có lỗi
+        messagebox.showerror("Lỗi", f"Lỗi khi lưu dữ liệu: {e}")
+
+
+# Hàm tải giá trị phôi và tổng số phôi từ file
+def load_phoi():
+    global phoi, total_phoi, drawC
+
+    try:
+        # Mở cửa sổ chọn tệp để tải
+        file_path = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
+        if not file_path:  # Kiểm tra nếu người dùng không chọn tệp
+            return
+
+        # Đọc dữ liệu từ tệp
+        with open(file_path, "r", encoding="utf-8") as file:
+            lines = file.readlines()
+
+            # Đảm bảo dữ liệu từ file có đủ số dòng
+            if len(lines) < len(phoi_array) + 1:
+                messagebox.showerror("Lỗi", "Dữ liệu trong file không đầy đủ.")
+                return
+
+            # Đọc tổng số phôi và cập nhật
+            total_phoi = int(lines[0].split(":")[1].strip())
+
+            # Đọc các giá trị phôi và cập nhật mảng phôi
+            for i in range(1, len(phoi_array) + 1):
+                phoi[i - 1] = int(lines[i].split(":")[1].strip())
+
+        # Thông báo khi tải thành công
+        messagebox.showinfo("Thông báo", f"Dữ liệu phôi đã được tải từ {file_path}")
+
+        # Cập nhật lại biểu đồ sau khi tải dữ liệu
+
+    except Exception as e:
+        # Thông báo khi có lỗi
+        messagebox.showerror("Lỗi", f"Lỗi khi tải dữ liệu: {e}")
+
+    drawC = True
+
+def capture():
+    global captureB
+    captureB = True
+
+# Hàm mở khóa quyền admin để chỉnh sửa chương trình
+def admin_enable():
+    global lock_time, is_locked, is_startup
+    messagebox.showinfo("Thông báo", "Đã đăng nhập quyền admin")
+    ab1_button.config(state="normal")
+    ab2_button.config(state="normal")
+    ab3_button.config(state="normal")
+    delay1_button.config(state="normal")
+    delay2_button.config(state="normal")
+    delay3_button.config(state="normal")
+    mark1_button.config(state="normal")
+    mark2_button.config(state="normal")
+    lock_time = time.time()
+    is_locked = True
+    is_startup = False
+
+
+# Hàm khóa quyền admin
+def admin_disable():
+    global is_locked
+    messagebox.showinfo("Thông báo", "Đã đăng xuất quyền admin")
+    ab1_button.config(state="disabled")
+    ab2_button.config(state="disabled")
+    ab3_button.config(state="disabled")
+    delay1_button.config(state="disabled")
+    delay2_button.config(state="disabled")
+    delay3_button.config(state="disabled")
+    mark1_button.config(state="disabled")
+    mark2_button.config(state="disabled")
+    is_locked = False
+
+
+# Hàm lưu dữ liệu vào file bảo mật data.txt
+def generate_key():
+    key = Fernet.generate_key()
+    with open("secret.key", "wb") as key_file:
+        key_file.write(key)
+
+
+# Hàm tải khóa từ file
+def load_key():
+    return open("secret.key", "rb").read()
+
+
+# Hàm mã hóa dữ liệu
+def encrypt_data(data):
+    key = load_key()
+    fernet = Fernet(key)
+    encrypted_data = fernet.encrypt(data.encode())
+    return encrypted_data
+
+
+# Hàm lưu dữ liệu bảo mật vào tệp
+def save_data():
+    global dataC, PassWord, a, b, Td, HSVlower, HSVupper
+    data = f"{PassWord}\n{a}\n{b}\n{Td}"
+
+    hsv_lower_str = ",".join(map(str, HSVlower))
+    hsv_upper_str = ",".join(map(str, HSVupper))
+
+    data += f"\n{hsv_lower_str}\n{hsv_upper_str}"
+
+    encrypted_data = encrypt_data(data)
+
+    with open("data.txt", "wb") as file:
+        file.write(encrypted_data)
+
+    dataC = False
+
+
+def decrypt_data(encrypted_data):
+    key = load_key()
+    fernet = Fernet(key)
+    decrypted_data = fernet.decrypt(encrypted_data).decode()
+    return decrypted_data
+
+
+# Hàm đọc dữ liệu từ file bảo mật
+def load_data():
+    global PassWord, a, b, Td, HSVlower, HSVupper
+    try:
+        with open("data.txt", "rb") as file:
+            encrypted_data = file.read()
+            decrypted_data = decrypt_data(encrypted_data)
+            data = decrypted_data.split("\n")
+
+            PassWord = data[0]
+            a = float(data[1])
+            b = float(data[2])
+            Td = float(data[3])
+
+            HSVlower = np.array(list(map(int, data[4].split(","))))
+            HSVupper = np.array(list(map(int, data[5].split(","))))
+
+            return PassWord, a, b, Td, HSVlower, HSVupper
+    except FileNotFoundError:
+        return "111111", 5.69, 6.68, 2.4, np.array([15, 75, 75]), np.array([35, 120, 160])
+
+
+# Giao diện chính
+def setup_main_window():
+    global cap, ab1_button, ab2_button, ab3_button, delay1_button, delay2_button, delay3_button, mark1_button, mark2_button
+
+    root.state("zoomed")
+    video_canvas = Canvas(root, width=640, height=480, bg="black")
+    video_canvas.grid(row=0, column=0, padx=60, pady=10)
+    detection_canvas = Canvas(root, width=640, height=480, bg="gray")
+    detection_canvas.grid(row=1, column=0, padx=60, pady=10, rowspan=4)
+    info_label = Label(root, text=None, font=("Arial", 14))
+    info_label.grid(row=1, column=1, padx=10, pady=10)
+    pass_button = Button(root, text="Đăng nhập", command=open_pass_window, width=20, height=2)
+    pass_button.grid(row=2, column=1, padx=10, pady=10)
+    Dpass_button = Button(root, text="Đăng xuất", command=admin_disable, width=20, height=2)
+    Dpass_button.grid(row=3, column=1, padx=10, pady=10)
+    Cpass_button = Button(root, text="Đổi mật khẩu", command=open_Cpass_window, width=20, height=2)
+    Cpass_button.grid(row=4, column=1, padx=10, pady=10)
+
+    # Thêm khung vẽ biểu đồ
+    graph_canvas = Canvas(root, width=960, height=480, bg="gray")
+    graph_canvas.grid(row=0, column=1, padx=60, pady=10, columnspan=2, sticky=N + S + E + W)
+
+    # Tạo Frame 1 để chứa các nút
+    button_frame1 = Frame(root)
+    button_frame1.grid(row=1, column=2, padx=10, pady=10)
+
+    # Thêm các nút vào Frame 1
+    exit_button = Button(button_frame1, text="Thoát", command=exit_program, width=20, height=2)
+    exit_button.pack(side=LEFT, padx=10)
+
+    reset_button = Button(button_frame1, text="Cài lại", command=reset_phoi, width=20, height=2)
+    reset_button.pack(side=LEFT, padx=10)
+
+    save_button = Button(button_frame1, text="Lưu", command=save_phoi, width=20, height=2)
+    save_button.pack(side=LEFT, padx=10)
+
+    load_button = Button(button_frame1, text="Tải", command=load_phoi, width=20, height=2)
+    load_button.pack(side=LEFT, padx=10)
+
+    capture_button = Button(button_frame1, text="Chụp", command=capture, width=20, height=2)
+    capture_button.pack(side=LEFT, padx=10)
+
+    # Tạo Frame 2 để chứa các nút
+    button_frame2 = Frame(root)
+    button_frame2.grid(row=2, column=2, padx=10, pady=10)
+
+    # Thêm các nút vào Frame 2
+    label_ab = Label(button_frame2, text="Căn chỉnh nhận diện:", font=("Arial", 14))
+    label_ab.pack(side=LEFT, padx=10)
+
+    ab1_button = Button(button_frame2, text="Tự động", command=change_autoABA, width=20, height=2, state="disabled")
+    ab1_button.pack(side=LEFT, padx=10)
+
+    ab2_button = Button(button_frame2, text="Thủ công", command=change_manualABN, width=20, height=2, state="disabled")
+    ab2_button.pack(side=LEFT, padx=10)
+
+    ab3_button = Button(button_frame2, text="Cài lại", command=defaultAB, width=20, height=2, state="disabled")
+    ab3_button.pack(side=LEFT, padx=10)
+
+    # Tạo Frame 3 để chứa các nút
+    button_frame3 = Frame(root)
+    button_frame3.grid(row=3, column=2, padx=10, pady=10)
+
+    # Thêm các nút vào Frame 3
+    label_delay = Label(button_frame3, text="Khoảng trễ nhận diện:", font=("Arial", 14))
+    label_delay.pack(side=LEFT, padx=10)
+
+    delay1_button = Button(button_frame3, text="Tự động", command=change_autoDelay, width=20, height=2,
+                           state="disabled")
+    delay1_button.pack(side=LEFT, padx=10)
+
+    delay2_button = Button(button_frame3, text="Thủ công", command=open_manualDelay_window, width=20, height=2,
+                           state="disabled")
+    delay2_button.pack(side=LEFT, padx=10)
+
+    delay3_button = Button(button_frame3, text="Cài lại", command=defaultDelay, width=20, height=2, state="disabled")
+    delay3_button.pack(side=LEFT, padx=10)
+
+    # Tạo Frame 4 để chứa các nút
+    button_frame4 = Frame(root)
+    button_frame4.grid(row=4, column=2, padx=10, pady=10)
+
+    # Thêm các nút vào Frame 4
+    label_mark = Label(button_frame4, text="Thay đổi nhận diện:", font=("Arial", 14))
+    label_mark.pack(side=LEFT, padx=10)
+
+    mark1_button = Button(button_frame4, text="Thay đổi", command=open_configMark_window, width=20, height=2,
+                          state="disabled")
+    mark1_button.pack(side=LEFT, padx=10)
+
+    mark2_button = Button(button_frame4, text="Cài lại", command=defaultHSV, width=20, height=2, state="disabled")
+    mark2_button.pack(side=LEFT, padx=10)
+
+    update_frame(video_canvas, detection_canvas, info_label, graph_canvas)
+
+
+# Cửa sổ kết nối
+def open_connection_window():
+    root.withdraw()  # Ẩn cửa sổ chính khi mở cửa sổ kết nối
+    # Tạo cửa sổ Toplevel
+    connection_window = Toplevel(root)
+    connection_window.title("Kết nối")
+
+    # Lấy kích thước của màn hình
+    screen_width = connection_window.winfo_screenwidth()
+    screen_height = connection_window.winfo_screenheight()
+
+    # Kích thước của cửa sổ kết nối
+    window_width = 230
+    window_height = 70
+
+    # Tính toán vị trí căn giữa
+    position_top = int(screen_height / 2 - window_height / 2)
+    position_left = int(screen_width / 2 - window_width / 2)
+
+    # Đặt cửa sổ Toplevel ở vị trí trung tâm
+    connection_window.geometry(f"{window_width}x{window_height}+{position_left}+{position_top}")
+
+    Label(connection_window, text="Webcam ID:").grid(row=2, column=0, padx=5, pady=5)
+    webcam_entry = Entry(connection_window)
+    webcam_entry.insert(0, "10")
+    webcam_entry.grid(row=2, column=1, padx=5, pady=5)
+
+    def connect_devices():
+        global cap, drawC, dataC
+        try:
+            webcam_id = int(webcam_entry.get())
+
+            info_array[0] = str(webcam_id)
+
+            time.sleep(2)
+
+            if webcam_id == 10:
+                cap = cv2.VideoCapture('video5.mp4')
+            else:
+                cap = cv2.VideoCapture(webcam_id)
+                if not cap.isOpened():
+                    messagebox.showerror("Lỗi", "Không thể mở webcam. Vui lòng kiểm tra lại kết nối!")
+                    cap.release()  # Giải phóng tài nguyên nếu có
+                    return  # Thoát khỏi chương trình con
+
+            connection_window.destroy()
+            root.deiconify()  # Hiển thị lại cửa sổ chính
+            setup_main_window()
+            load_data()
+
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Kết nối thất bại: {e}")
+        drawC = True
+
+    button_frame = Frame(connection_window)
+    button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+
+    button1 = Button(button_frame, text="Kết nối", command=connect_devices)
+    button1.pack(side=LEFT, padx=10)
+    button2 = Button(button_frame, text="Thoát", command=connection_window.destroy)
+    button2.pack(side=LEFT, padx=10)
+
+
+# Cửu sổ nhập mật khẩu
+def open_pass_window():
+    global is_config
+    is_config = True
+    # Tạo cửa sổ Toplevel
+    pass_window = Toplevel(root)
+    pass_window.title("Đăng nhập")
+
+    # Lấy kích thước của màn hình
+    screen_width = pass_window.winfo_screenwidth()
+    screen_height = pass_window.winfo_screenheight()
+
+    # Kích thước của cửa sổ kết nối
+    window_width = 210
+    window_height = 70
+
+    # Tính toán vị trí căn giữa
+    position_top = int(screen_height / 2 - window_height / 2)
+    position_left = int(screen_width / 2 - window_width / 2)
+
+    # Đặt cửa sổ Toplevel ở vị trí trung tâm
+    pass_window.geometry(f"{window_width}x{window_height}+{position_left}+{position_top}")
+    pass_window.grab_set()
+
+    # Thêm nhãn và ô nhập
+    Label(pass_window, text="Mật khẩu:").grid(row=0, column=0, padx=5, pady=5)
+    pass_entry = Entry(pass_window, show="*")  # Dùng `show="*"` để ẩn mật khẩu khi gõ
+    pass_entry.grid(row=0, column=1, padx=5, pady=5)
+
+    # Hàm kiểm tra mật khẩu
+    def login_devices():
+        input_password = pass_entry.get()  # Lấy nội dung người dùng nhập
+        if input_password == PassWord:  # So sánh với mã đúng
+            messagebox.showinfo("Thông báo", "Mật khẩu đúng, bạn đã đăng nhập!")
+            admin_enable()  # kích hoạt các nút điều chỉnh
+            pass_window_close()
+        else:
+            messagebox.showerror("Lỗi", "Mật khẩu không đúng, vui lòng thử lại!")
+
+    def pass_window_close():
+        global is_config
+        is_config = False
+        pass_window.destroy()
+
+    # Thêm nút để đăng nhập
+    button_frame = Frame(pass_window)
+    button_frame.grid(row=1, column=0, columnspan=2, pady=10)
+
+    button1 = Button(button_frame, text="Đăng nhập", command=login_devices)
+    button1.pack(side=LEFT, padx=10)
+    button2 = Button(button_frame, text="Thoát", command=pass_window_close)
+    button2.pack(side=LEFT, padx=10)
+
+
+# Cửa sổ thay đổi mật khẩu
+def open_Cpass_window():
+    # Tạo cửa sổ Toplevel
+    global is_config
+    is_config = True
+    Cpass_window = Toplevel(root)
+    Cpass_window.title("Đổi mật khẩu")
+
+    # Lấy kích thước của màn hình
+    screen_width = Cpass_window.winfo_screenwidth()
+    screen_height = Cpass_window.winfo_screenheight()
+
+    # Kích thước của cửa sổ kết nối
+    window_width = 230
+    window_height = 140
+
+    # Tính toán vị trí căn giữa
+    position_top = int(screen_height / 2 - window_height / 2)
+    position_left = int(screen_width / 2 - window_width / 2)
+
+    # Đặt cửa sổ Toplevel ở vị trí trung tâm
+    Cpass_window.geometry(f"{window_width}x{window_height}+{position_left}+{position_top}")
+    Cpass_window.grab_set()
+
+    # Thêm nhãn và ô nhập
+    Label(Cpass_window, text="Mật khẩu cũ:").grid(row=0, column=0, padx=5, pady=5)
+    pass_entry = Entry(Cpass_window, show="*")  # Dùng `show="*"` để ẩn mật khẩu khi gõ
+    pass_entry.grid(row=0, column=1, padx=5, pady=5)
+
+    Label(Cpass_window, text="Mật khẩu mới:").grid(row=1, column=0, padx=5, pady=5)
+    Npass_entry = Entry(Cpass_window, show="*")  # Dùng `show="*"` để ẩn mật khẩu khi gõ
+    Npass_entry.grid(row=1, column=1, padx=5, pady=5)
+
+    Label(Cpass_window, text="Nhập lại:").grid(row=2, column=0, padx=5, pady=5)
+    NNpass_entry = Entry(Cpass_window, show="*")  # Dùng `show="*"` để ẩn mật khẩu khi gõ
+    NNpass_entry.grid(row=2, column=1, padx=5, pady=5)
+
+    # Hàm kiểm tra thay đổi mật khẩu
+    def change_password():
+        global PassWord, dataC
+        input_password = pass_entry.get()  # Lấy nội dung người dùng nhập
+        if input_password == PassWord:  # So sánh với mã đúng
+            if Npass_entry.get() != "":
+                if Npass_entry.get() == NNpass_entry.get():
+                    PassWord = Npass_entry.get()
+                    dataC = True
+                    Cpass_window_close()
+                    messagebox.showinfo("Thông báo", "Đã đổi mật khẩu đăng nhập!")
+                else:
+                    messagebox.showerror("Lỗi", "Mật khẩu mới không trùng, vui lòng thử lại!")
+            else:
+                messagebox.showerror("Lỗi", "Vui lòng nhập mật khẩu mới!")
+        else:
+            messagebox.showerror("Lỗi", "Mật khẩu cũ không đúng, vui lòng thử lại!")
+
+    # Hàm thoát cửa sổ đổi mật khẩu
+    def Cpass_window_close():
+        global is_config
+        is_config = False
+        Cpass_window.destroy()
+
+    button_frame = Frame(Cpass_window)
+    button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+
+    button1 = Button(button_frame, text="Đổi mật khẩu", command=change_password)
+    button1.pack(side=LEFT, padx=10)
+    button2 = Button(button_frame, text="Thoát", command=Cpass_window_close)
+    button2.pack(side=LEFT, padx=10)
+
+
+# Cửa sổ thay đổi hệ số a, b tự động
+def open_autoAB_window():
+    # Tạo cửa sổ Toplevel
+    autoAB_window = Toplevel(root)
+    autoAB_window.title("Căn chỉnh tự động")
+
+    # Lấy kích thước của màn hình
+    screen_width = autoAB_window.winfo_screenwidth()
+    screen_height = autoAB_window.winfo_screenheight()
+
+    # Kích thước của cửa sổ kết nối
+    window_width = 270
+    window_height = 140
+
+    # Tính toán vị trí căn giữa
+    position_top = int(screen_height / 2 - window_height / 2)
+    position_left = int(screen_width / 2 - window_width / 2)
+
+    # Đặt cửa sổ Toplevel ở vị trí trung tâm
+    autoAB_window.geometry(f"{window_width}x{window_height}+{position_left}+{position_top}")
+
+    autoAB_window.grab_set()
+
+    Label(autoAB_window, text="Số lần căn chỉnh:").grid(row=0, column=0, padx=5, pady=5)
+    sl_entry = Entry(autoAB_window)
+    sl_entry.grid(row=0, column=1, padx=5, pady=5)
+
+    Label(autoAB_window, text="Đường kính phôi mẫu:").grid(row=1, column=0, padx=5, pady=5)
+    d_entry = Entry(autoAB_window)
+    d_entry.grid(row=1, column=1, padx=5, pady=5)
+
+    Label(autoAB_window, text="Chiều cao phôi mẫu:").grid(row=2, column=0, padx=5, pady=5)
+    l_entry = Entry(autoAB_window)
+    l_entry.grid(row=2, column=1, padx=5, pady=5)
+
+    # Hàm đặt đọc các thông tin để tính toán a, b tự động
+    def change_autoAB():
+        global a, b, is_autoAB, is_configAB, dataC, sl, tl, td, count_config, wt, ht
+        is_configAB = True
+        a, b, count_config = 1, 1, 0
+        wt, ht = 0, 0
+        sl = int(sl_entry.get())
+        tl = int(l_entry.get())
+        td = int(d_entry.get())
+        autoAB_window.destroy()
+        messagebox.showinfo("Thông báo", "Ấn nút một lần nữa để hủy quá trình căn chỉnh tự động!")
+
+    # Hàm đóng cửa sổ thay đổi chỉ số a, b tự động
+    def autoAB_window_close():
+        global is_config
+        is_config = False
+        autoAB_window.destroy()
+        messagebox.showinfo("Thông báo", "Đã hủy quá trình căn chỉnh tự động!")
+
+    button_frame = Frame(autoAB_window)
+    button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+
+    button1 = Button(button_frame, text="Thay đổi", command=change_autoAB)
+    button1.pack(side=LEFT, padx=10)
+    button2 = Button(button_frame, text="Thoát", command=autoAB_window_close)
+    button2.pack(side=LEFT, padx=10)
+
+
+# Hàm tính toán chỉ số a, b tự động
+def change_autoABN():
+    global sl, tl, td, a, b, w, h, is_autoAB, dataC, count_config, is_configAB, wt, ht, is_config
+    if count_config < sl and is_autoAB:
+        wt += w
+        ht += h
+        count_config += 1
+        is_autoAB = False
+    if count_config == sl:
+        wt = wt / sl
+        ht = ht / sl
+        a = round((wt / td), 4)
+        b = round((ht / tl), 4)
+        dataC = True
+        is_configAB = False
+        messagebox.showinfo("Thông báo", f"Sau {sl} lần đo được hệ số chiều cao {b} và hệ số đường kính {a}.")
+        is_config = False
+
+
+# Hàm cấu hình nút ấn thay đổi chỉ số a, b tự động
+def change_autoABA():
+    global is_autoABA, is_configAB, is_config
+    if is_autoABA:
+        is_autoABA = False
+        is_config = True
+        open_autoAB_window()
+    else:
+        is_configAB = False
+        messagebox.showinfo("Thông báo", "Đã hủy quá trình căn chỉnh tự động!")
+        is_autoABA = True
+        is_config = False
+
+
+# Cửa sổ thay đổi chỉ số a, b thủ công
+def open_manualAB_window():
+    # Tạo cửa sổ Toplevel
+    manualAB_window = Toplevel(root)
+    manualAB_window.title("Căn chỉnh thủ công")
+
+    # Lấy kích thước của màn hình
+    screen_width = manualAB_window.winfo_screenwidth()
+    screen_height = manualAB_window.winfo_screenheight()
+
+    # Kích thước của cửa sổ kết nối
+    window_width = 250
+    window_height = 110
+
+    # Tính toán vị trí căn giữa
+    position_top = int(screen_height / 2 - window_height / 2)
+    position_left = int(screen_width / 2 - window_width / 2)
+
+    # Đặt cửa sổ Toplevel ở vị trí trung tâm
+    manualAB_window.geometry(f"{window_width}x{window_height}+{position_left}+{position_top}")
+
+    manualAB_window.grab_set()
+
+    Label(manualAB_window, text="Hệ số chiều cao:").grid(row=1, column=0, padx=5, pady=5)
+    b_entry = Entry(manualAB_window)
+    b_entry.grid(row=1, column=1, padx=5, pady=5)
+
+    Label(manualAB_window, text="Hệ số đường kính:").grid(row=0, column=0, padx=5, pady=5)
+    a_entry = Entry(manualAB_window)
+    a_entry.grid(row=0, column=1, padx=5, pady=5)
+
+    # Hàm thay đổi chỉ số a, b thủ công
+    def change_manualAB():
+        global a, b, is_manualAB, dataC, is_config
+        a = float(a_entry.get())
+        b = float(b_entry.get())
+        manualAB_window.destroy()
+        dataC = True
+        messagebox.showinfo("Thông báo", "Thay đổi thành công hệ số đường kính và chiều cao")
+        is_manualAB = False
+        is_config = False
+
+    # Hàm thoát cửa sổ thay đổi chỉ số a, b thủ công
+    def cancel_manualAB():
+        global is_manualAB, is_config
+        is_manualAB = False
+        is_config = False
+        manualAB_window.destroy()
+        messagebox.showinfo("Thông báo", "Hủy quá trình căn chỉnh thủ công")
+
+    button_frame = Frame(manualAB_window)
+    button_frame.grid(row=2, column=0, columnspan=2, pady=10)
+
+    button1 = Button(button_frame, text="Thay đổi", command=change_manualAB)
+    button1.pack(side=LEFT, padx=10)
+    button2 = Button(button_frame, text="Thoát", command=cancel_manualAB)
+    button2.pack(side=LEFT, padx=10)
+
+
+# Hàm cấu hình nút nhấn thay đổi chỉ số a, b thủ công
+def change_manualABN():
+    global a, b, is_manualAB, is_config
+    if is_manualAB:
+        open_manualAB_window()
+    else:
+        is_manualAB = True
+        is_config = True
+        messagebox.showinfo("Thông báo",
+                            "Ảnh nhận diện sẽ hiển thị giá trị gốc của đường kính và chiều cao. Ấn một lần nữa để nhập hệ số đường kính và chiều cao.")
+
+
+# Hàm thay đổi độ trễ nhận diện Td tự động
+def change_autoDelay():
+    global is_autoDelayT, is_autoDelayB, autoDelay_StartTime, Td, dataC, is_config
+    if not is_autoDelayB and not is_autoDelayT:
+        messagebox.showinfo("Thông báo",
+                            "Đặt phôi vào băng tải, đến khi phôi đến đúng vị trí mong muốn ấn nút một lần nữa để lưu khoảng trễ. Ấn một lần nữa để hủy quá trình.")
+        is_autoDelayB = True
+        is_config = True
+    elif is_autoDelayB and not is_autoDelayT:
+        is_autoDelayB = False
+        is_config = False
+        messagebox.showinfo("Thông báo", "Đã hủy quá trình thay đổi khoảng trễ nhận diện tự động!")
+    elif is_autoDelayB and is_autoDelayT:
+        Td = time.time() - autoDelay_StartTime
+        is_autoDelayB = False
+        is_autoDelayT = False
+        is_config = False
+        dataC = True
+        messagebox.showinfo("Thông báo", f"Đã thay đổi khoảng trễ nhận diện thành {Td} giây.")
+
+
+# Cửa sổ thay đổi độ trễ nhận diện Td thủ công
+def open_manualDelay_window():
+    # Tạo cửa sổ Toplevel
+    manualDelay_window = Toplevel(root)
+    manualDelay_window.title("Căn chỉnh thủ công")
+
+    # Lấy kích thước của màn hình
+    screen_width = manualDelay_window.winfo_screenwidth()
+    screen_height = manualDelay_window.winfo_screenheight()
+
+    # Kích thước của cửa sổ kết nối
+    window_width = 270
+    window_height = 70
+
+    # Tính toán vị trí căn giữa
+    position_top = int(screen_height / 2 - window_height / 2)
+    position_left = int(screen_width / 2 - window_width / 2)
+
+    # Đặt cửa sổ Toplevel ở vị trí trung tâm
+    manualDelay_window.geometry(f"{window_width}x{window_height}+{position_left}+{position_top}")
+
+    manualDelay_window.grab_set()
+
+    Label(manualDelay_window, text="Khoảng trễ nhận diện:").grid(row=0, column=0, padx=5, pady=5)
+    d_entry = Entry(manualDelay_window)
+    d_entry.grid(row=0, column=1, padx=5, pady=5)
+
+    # Hàm thay đổi độ trễ nhận diện Td thủ công
+    def change_manualDelay():
+        global Td, dataC, is_config
+        Td = float(d_entry.get())
+        dataC = True
+        manualDelay_window.destroy()
+        is_config = False
+        messagebox.showinfo("Thông báo", f"Đã thay đổi khoảng trễ nhận diện thành {Td} giây.")
+
+    # Hàm đóng cửa sổ thay đổi độ trễ nhận diện Td thủ công
+    def manualDelay_window_close():
+        global is_config
+        is_config = False
+        manualDelay_window.destroy()
+        messagebox.showinfo("Thông báo", "Đã hủy quá trình thay đổi khoảng trễ nhận diện thủ công!")
+
+    button_frame = Frame(manualDelay_window)
+    button_frame.grid(row=2, column=0, columnspan=2, pady=10)
+
+    button1 = Button(button_frame, text="Thay đổi", command=change_manualDelay)
+    button1.pack(side=LEFT, padx=10)
+    button2 = Button(button_frame, text="Thoát", command=manualDelay_window_close)
+    button2.pack(side=LEFT, padx=10)
+
+
+# Hàm cài lại giá trị ban đầu cho a, b
+def defaultAB():
+    global a, b, dataC
+    a, b = 5.69, 6.68
+    dataC = True
+    messagebox.showinfo("Thông báo", "Đã đặt hệ số chiều cao và đường kính về 5.69 và 6.68!")
+
+
+# Hàm cài lại giá trị ban đầu cho Td
+def defaultDelay():
+    global Td, dataC
+    Td = 2.4
+    dataC = True
+    messagebox.showinfo("Thông báo", "Đã đặt khoảng trễ nhận diện về 2.4 giây!")
+
+
+# Cửa sổ cấu hình giá trị mặt nạ màu HSVlower và HSVupper
+def open_configMark_window():
+    global is_config, is_MarkConfig
+    is_config = True
+    is_MarkConfig = True
+
+    # Tạo cửa sổ con
+    Mark_window = Toplevel(root)
+    Mark_window.title("Mặt nạ màu HSV")
+    Mark_window.state("zoomed")
+
+    # Video và các khung hình
+    video_label = Label(Mark_window, text="Video Gốc")
+    video_label.grid(row=0, column=0, padx=160, pady=10)
+    mask_label = Label(Mark_window, text="Mặt Nạ HSV")
+    mask_label.grid(row=1, column=0, padx=160, pady=10, rowspan=2)
+    result_label = Label(Mark_window, text="Kết Quả Lọc")
+    result_label.grid(row=0, column=1, padx=160, pady=10)
+
+    # Các thanh trượt (Scale)
+    controls_frame = LabelFrame(Mark_window, text="Điều chỉnh HSV")
+    controls_frame.grid(row=1, column=1, columnspan=3, padx=160, pady=10)
+
+    # Tạo các thanh trượt cho điều chỉnh giá trị HSV
+    h_min_scale = Scale(controls_frame, from_=0, to=179, orient="horizontal", length=300, label="H Min")
+    h_min_scale.set(0)
+    h_min_scale.pack()
+
+    h_max_scale = Scale(controls_frame, from_=0, to=179, orient="horizontal", length=300, label="H Max")
+    h_max_scale.set(179)
+    h_max_scale.pack()
+
+    s_min_scale = Scale(controls_frame, from_=0, to=255, orient="horizontal", length=300, label="S Min")
+    s_min_scale.set(0)
+    s_min_scale.pack()
+
+    s_max_scale = Scale(controls_frame, from_=0, to=255, orient="horizontal", length=300, label="S Max")
+    s_max_scale.set(255)
+    s_max_scale.pack()
+
+    v_min_scale = Scale(controls_frame, from_=0, to=255, orient="horizontal", length=300, label="V Min")
+    v_min_scale.set(0)
+    v_min_scale.pack()
+
+    v_max_scale = Scale(controls_frame, from_=0, to=255, orient="horizontal", length=300, label="V Max")
+    v_max_scale.set(255)
+    v_max_scale.pack()
+
+    # Hàm thay đổi giá trị HSVlower và HSVupper
+    def change_HSV():
+        global HSVupper, HSVlower, dataC
+        HSVlower = np.array([h_min_scale.get(), s_min_scale.get(), v_min_scale.get()])
+        HSVupper = np.array([h_max_scale.get(), s_max_scale.get(), v_max_scale.get()])
+        dataC = True
+        Mark_window_close()
+        messagebox.showinfo("Thông báo", "Đã cài lại mặt nạ màu!")
+
+    # Hàm đóng cửa sổ thay đổi giá trị HSVlower và HSVupper
+    def Mark_window_close():
+        global is_config, is_MarkConfig
+        is_config = False
+        is_MarkConfig = False
+        Mark_window.destroy()
+
+    button_frame = Frame(Mark_window)
+    button_frame.grid(row=2, column=1, pady=10)
+
+    button1 = Button(button_frame, text="Thay đổi", command=change_HSV)
+    button1.pack(side=LEFT, padx=10)
+    button2 = Button(button_frame, text="Thoát", command=Mark_window_close)
+    button2.pack(side=LEFT, padx=10)
+
+    # Hàm cập nhật video
+    def update_mark_window():
+        if not cap.isOpened():
+            return
+
+        ret, frame = cap.read()
+        if ret:
+            frame = cv2.resize(frame, (640, 480))
+            # Chuyển khung hình sang HSV
+            hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+            # Lấy các giá trị từ thanh trượt
+            lower_bound = np.array([h_min_scale.get(), s_min_scale.get(), v_min_scale.get()])
+            upper_bound = np.array([h_max_scale.get(), s_max_scale.get(), v_max_scale.get()])
+
+            # Tạo mặt nạ và khung hình kết quả
+            mask = cv2.inRange(hsv_frame, lower_bound, upper_bound)
+
+            mask = cv2.GaussianBlur(mask, (11, 11), 0)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+            result_frame = cv2.bitwise_and(frame, frame, mask=mask)
+
+            # Chuyển khung hình thành RGB để sử dụng với Tkinter
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mask_rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
+            result_rgb = cv2.cvtColor(result_frame, cv2.COLOR_BGR2RGB)
+
+            # Cập nhật nhãn hiển thị
+            video_img = ImageTk.PhotoImage(Image.fromarray(frame_rgb))
+            video_label.config(image=video_img)
+            video_label.imgtk = video_img  # Lưu lại tham chiếu để tránh GC
+
+            mask_img = ImageTk.PhotoImage(Image.fromarray(mask_rgb))
+            mask_label.config(image=mask_img)
+            mask_label.imgtk = mask_img
+
+            result_img = ImageTk.PhotoImage(Image.fromarray(result_rgb))
+            result_label.config(image=result_img)
+            result_label.imgtk = result_img
+
+        # Lặp lại việc cập nhật
+        Mark_window.after(10, update_mark_window)
+
+    # Khởi động hàm cập nhật
+    update_mark_window()
+
+
+# Hàm cài lại giá trị mặc định cho HSVlower và HSVupper
+def defaultHSV():
+    global HSVlower, HSVupper, dataC
+    HSVupper = np.array([35, 120, 160])
+    HSVlower = np.array([15, 75, 75])
+    dataC = True
+    messagebox.showinfo("Thông báo", "Đã đặt mặt nạ màu về mặc định!")
+
+
+# Chương trình chính
+if not os.path.exists("secret.key"):
+    generate_key()
+root = Tk()
+root.title("Hệ thống nhận diện và phân loại")
+open_connection_window()
+root.mainloop()
